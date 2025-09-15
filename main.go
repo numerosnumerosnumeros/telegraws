@@ -12,12 +12,30 @@ import (
 	"telegraws/utils"
 
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/aws-sdk-go-v2/service/wafv2"
+
 	"go.uber.org/zap"
 )
+
+func getAccountID(ctx context.Context, cfg aws.Config) (string, error) {
+	if acct := os.Getenv("AWS_ACCOUNT_ID"); acct != "" {
+		return acct, nil
+	}
+
+	// Fallback: call STS
+	client := sts.NewFromConfig(cfg)
+	output, err := client.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return "", fmt.Errorf("failed to get account ID: %w", err)
+	}
+	return *output.Account, nil
+}
 
 func logic(ctx context.Context) error {
 	appConfig, err := config.LoadEmbeddedConfig()
@@ -39,9 +57,24 @@ func logic(ctx context.Context) error {
 		return fmt.Errorf("unable to load SDK config: %v", err)
 	}
 
-	cwClient := cloudwatch.NewFromConfig(awsCfg)
 	logsClient := cloudwatchlogs.NewFromConfig(awsCfg)
+	cwClient := cloudwatch.NewFromConfig(awsCfg)
 	wafClient := wafv2.NewFromConfig(awsCfg)
+	dynamoClient := dynamodb.NewFromConfig(awsCfg)
+
+	// CloudFront requires us-east-1 clients
+	cfCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion("us-east-1"))
+	if err != nil {
+		return fmt.Errorf("unable to load SDK config for us-east-1: %v", err)
+	}
+	cwCfClient := cloudwatch.NewFromConfig(cfCfg)
+	wafCfClient := wafv2.NewFromConfig(cfCfg)
+
+	// Resolve AWS account ID
+	accountID, err := getAccountID(ctx, awsCfg)
+	if err != nil {
+		return fmt.Errorf("failed to resolve AWS account ID: %w", err)
+	}
 
 	allMetrics := make(map[string]any)
 
@@ -78,7 +111,7 @@ func logic(ctx context.Context) error {
 	}
 
 	if appConfig.Services.CloudFront.Enabled {
-		cloudFrontMetrics, err := services.CloudFrontMetrics(ctx, cwClient, appConfig.Services.CloudFront.DistributionID, timeParamsMap)
+		cloudFrontMetrics, err := services.CloudFrontMetrics(ctx, cwCfClient, appConfig.Services.CloudFront.DistributionID, timeParamsMap)
 		if err != nil {
 			utils.Logger.Error("Failed to get CloudFront metrics", zap.Error(err))
 		} else {
@@ -113,14 +146,34 @@ func logic(ctx context.Context) error {
 		}
 	}
 
-	scope := appConfig.Services.WAF.Scope
-	if scope == "" {
-		scope = "REGIONAL" // default
-	}
-
 	if appConfig.Services.WAF.Enabled {
-		wafMetrics, err := services.WAFMetrics(ctx, wafClient, cwClient, appConfig.Services.WAF.WebACLID, appConfig.Services.WAF.WebACLName, scope, timeParamsMap)
-		if err != nil {
+		scope := appConfig.Services.WAF.Scope
+		if scope == "" {
+			scope = "REGIONAL"
+		}
+
+		var wafClientToUse *wafv2.Client
+		var cwClientToUse *cloudwatch.Client
+
+		if scope == "CLOUDFRONT" {
+			wafClientToUse = wafCfClient
+			cwClientToUse = cwCfClient // 🔑 use us-east-1 CW client
+		} else {
+			wafClientToUse = wafClient
+			cwClientToUse = cwClient
+		}
+
+		if wafMetrics, err := services.WAFMetrics(
+			ctx,
+			wafClientToUse,
+			cwClientToUse, // 🔑 now correct per scope
+			appConfig.Services.WAF.WebACLID,
+			appConfig.Services.WAF.WebACLName,
+			scope,
+			timeParamsMap,
+			accountID,
+			appConfig.Services.CloudFront.DistributionID,
+		); err != nil {
 			utils.Logger.Error("Failed to get WAF metrics", zap.Error(err))
 		} else {
 			allMetrics["waf"] = wafMetrics
@@ -130,7 +183,7 @@ func logic(ctx context.Context) error {
 	if appConfig.Services.DynamoDB.Enabled {
 		dynamoMetrics := make(map[string]any)
 		for _, tableName := range appConfig.Services.DynamoDB.TableNames {
-			dynamodbMetrics, err := services.DynamoDBMetrics(ctx, cwClient, timeParamsMap, tableName)
+			tableMetrics, err := services.DynamoDBMetrics(ctx, cwClient, dynamoClient, timeParamsMap, tableName)
 			if err != nil {
 				utils.Logger.Error("Failed to get DynamoDB metrics",
 					zap.Error(err),
@@ -138,7 +191,7 @@ func logic(ctx context.Context) error {
 				)
 				continue
 			}
-			dynamoMetrics[tableName] = dynamodbMetrics
+			dynamoMetrics[tableName] = tableMetrics
 		}
 		if len(dynamoMetrics) > 0 {
 			allMetrics["dynamodb"] = dynamoMetrics

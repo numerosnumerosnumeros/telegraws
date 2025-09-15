@@ -11,146 +11,85 @@ import (
 
 func S3Metrics(ctx context.Context, cwClient *cloudwatch.Client, bucketName string, timeParams map[string]time.Time) (map[string]float64, error) {
 	metrics := map[string]float64{}
-	period := aws.Int32(86400) // Always use daily for S3
+	period := aws.Int32(86400) // S3 publishes storage metrics once per day
 
-	// Storage metrics (daily reporting)
-	storageMetrics := []struct {
-		Name         string
-		Statistic    string
-		StorageTypes []string // Try multiple storage types
-	}{
-		{"BucketSizeBytes", "Average", []string{
-			"StandardStorage",
-			"StandardIAStorage",
-			"StandardIASizeOverhead",
-			"ReducedRedundancyStorage",
-			"GlacierStorage",
-			"DeepArchiveStorage",
-			"GlacierInstantRetrievalSizeOverhead",
-			"GlacierFlexibleRetrievalSizeOverhead",
-			"GlacierDeepArchiveSizeOverhead",
-			"IntelligentTieringFAStorage",
-			"IntelligentTieringIAStorage",
-			"IntelligentTieringAAStorage",
-			"IntelligentTieringAIAStorage",
-			"IntelligentTieringDAAStorage",
-		}},
+	// BucketSizeBytes can be broken down by StorageType
+	storageTypes := []string{
+		"StandardStorage",
+		"StandardIAStorage",
+		"ReducedRedundancyStorage",
+		"GlacierStorage",
+		"DeepArchiveStorage",
+		"IntelligentTieringFAStorage",
+		"IntelligentTieringIAStorage",
+		"IntelligentTieringAAStorage",
+		"IntelligentTieringAIAStorage",
+		"IntelligentTieringDAAStorage",
 	}
 
-	// Try storage metrics with different storage types
-	for _, metric := range storageMetrics {
-		found := false
-		for _, storageType := range metric.StorageTypes {
-			dimensions := []types.Dimension{
-				{
-					Name:  aws.String("BucketName"),
-					Value: aws.String(bucketName),
-				},
-				{
-					Name:  aws.String("StorageType"),
-					Value: aws.String(storageType),
-				},
-			}
-
-			input := &cloudwatch.GetMetricStatisticsInput{
-				Namespace:  aws.String("AWS/S3"),
-				MetricName: aws.String(metric.Name),
-				Dimensions: dimensions,
-				StartTime:  aws.Time(timeParams["startTime"]),
-				EndTime:    aws.Time(timeParams["endTime"]),
-				Period:     period,
-				Statistics: []types.Statistic{types.Statistic(metric.Statistic)},
-			}
-
-			result, err := cwClient.GetMetricStatistics(ctx, input)
-			if err != nil {
-				continue // Try next storage type
-			}
-
-			if len(result.Datapoints) > 0 && result.Datapoints[0].Average != nil {
-				value := *result.Datapoints[0].Average
-
-				if metric.Name == "BucketSizeBytes" {
-					value = value / (1024.0 * 1024.0)
-				}
-
-				metrics[metric.Name] = value
-				found = true
-				break // Found data, stop trying other storage types
-			}
-		}
-
-		if !found {
-			metrics[metric.Name] = 0.0
-		}
-	}
-
-	// Request metrics (only if enabled in bucket - these are often 0)
-	requestMetrics := []struct {
-		Name      string
-		Statistic string
-		Unit      string
-	}{
-		{"AllRequests", "Sum", "Count"},
-		{"4xxErrors", "Sum", "Count"},
-		{"5xxErrors", "Sum", "Count"},
-		{"BytesUploaded", "Sum", "Bytes"},
-		{"BytesDownloaded", "Sum", "Bytes"},
-	}
-
-	// Use hourly period for request metrics
-	requestPeriod := aws.Int32(3600)
-	if timeParams["endTime"].Sub(timeParams["startTime"]) >= 24*time.Hour {
-		requestPeriod = aws.Int32(86400)
-	}
-
-	for _, metric := range requestMetrics {
-		dimensions := []types.Dimension{
-			{
-				Name:  aws.String("BucketName"),
-				Value: aws.String(bucketName),
-			},
-		}
-
+	var totalSize float64
+	for _, storageType := range storageTypes {
 		input := &cloudwatch.GetMetricStatisticsInput{
 			Namespace:  aws.String("AWS/S3"),
-			MetricName: aws.String(metric.Name),
-			Dimensions: dimensions,
+			MetricName: aws.String("BucketSizeBytes"),
+			Dimensions: []types.Dimension{
+				{Name: aws.String("BucketName"), Value: aws.String(bucketName)},
+				{Name: aws.String("StorageType"), Value: aws.String(storageType)},
+			},
 			StartTime:  aws.Time(timeParams["startTime"]),
 			EndTime:    aws.Time(timeParams["endTime"]),
-			Period:     requestPeriod,
-			Statistics: []types.Statistic{types.Statistic(metric.Statistic)},
-			Unit:       types.StandardUnit(metric.Unit),
+			Period:     period,
+			Statistics: []types.Statistic{types.StatisticAverage},
 		}
 
 		result, err := cwClient.GetMetricStatistics(ctx, input)
-		if err != nil {
-			metrics[metric.Name] = 0.0
+		if err != nil || len(result.Datapoints) == 0 {
 			continue
 		}
 
-		if len(result.Datapoints) > 0 {
-			var value float64
-			switch metric.Statistic {
-			case "Sum":
-				if result.Datapoints[0].Sum != nil {
-					value = *result.Datapoints[0].Sum
-				}
-			case "Average":
-				if result.Datapoints[0].Average != nil {
-					value = *result.Datapoints[0].Average
-				}
+		// pick latest datapoint
+		latest := result.Datapoints[0]
+		for _, dp := range result.Datapoints {
+			if dp.Timestamp.After(*latest.Timestamp) {
+				latest = dp
 			}
-
-			// Convert bytes to MB for readability
-			if metric.Unit == "Bytes" {
-				value = value / (1024.0 * 1024.0)
-			}
-
-			metrics[metric.Name] = value
-		} else {
-			metrics[metric.Name] = 0.0
 		}
+
+		if latest.Average != nil {
+			totalSize += *latest.Average
+		}
+	}
+
+	// convert to MB
+	metrics["BucketSizeMB"] = totalSize / (1024.0 * 1024.0)
+
+	// --- NumberOfObjects ---
+	input := &cloudwatch.GetMetricStatisticsInput{
+		Namespace:  aws.String("AWS/S3"),
+		MetricName: aws.String("NumberOfObjects"),
+		Dimensions: []types.Dimension{
+			{Name: aws.String("BucketName"), Value: aws.String(bucketName)},
+			{Name: aws.String("StorageType"), Value: aws.String("AllStorageTypes")},
+		},
+		StartTime:  aws.Time(timeParams["startTime"]),
+		EndTime:    aws.Time(timeParams["endTime"]),
+		Period:     period,
+		Statistics: []types.Statistic{types.StatisticAverage},
+	}
+
+	result, err := cwClient.GetMetricStatistics(ctx, input)
+	if err == nil && len(result.Datapoints) > 0 {
+		latest := result.Datapoints[0]
+		for _, dp := range result.Datapoints {
+			if dp.Timestamp.After(*latest.Timestamp) {
+				latest = dp
+			}
+		}
+		if latest.Average != nil {
+			metrics["NumberOfObjects"] = *latest.Average
+		}
+	} else {
+		metrics["NumberOfObjects"] = 0.0
 	}
 
 	return metrics, nil

@@ -54,9 +54,7 @@ cp config/config-template.json config/config.json
   required.
 - RDS monitoring currently supports Aurora engine.
 - WAF monitoring collects WAFs metrics attached to ALB.
-- Some S3 metrics require S3 request metrics to be enabled.
 - CloudWatch Agent monitors disk_used_percent and mem_used_percent.
-- If you just want daily reports, set defaultPeriod to 0 on config.json.
 - Telegram has 4096 character limit per message.
 
 ## Metrics
@@ -64,16 +62,15 @@ cp config/config-template.json config/config.json
 - EC2: CPU Utilization (avg/max), Network I/O, Status Checks. If CloudWatch
   Agent: mem_used_percent, disk_used_percent.
 
-- S3: (Daily Reports Only) Bucket Size, Request Count, Error Rates, Bytes
-  Uploaded, Bytes Downloaded.
+- S3: (Daily Reports Only) Bucket Size, Objects Count.
 
 - ALB: Request Count, Response Time, HTTP Status Codes, Healthy/Unhealthy Hosts,
   ALB Errors.
 
-- CloudFront: Requests, Bytes Uploaded, Bytes Downloaded, Cache Hit Rate, Error
-  Rates, Origin Latency.
+- CloudFront: Requests, Bytes Uploaded, Bytes Downloaded, Error Rates.
 
-- DynamoDB: Request Count, Throttles, Latency, Consumed Capacity, Error Counts.
+- DynamoDB: Request Count, Items Count, Throttles, Latency, Consumed Capacity,
+  Error Counts.
 
 - RDS/Aurora: Instance: CPU, Memory, Connections, Read/Write Latency. Cluster:
   Volume Size, IOPS.

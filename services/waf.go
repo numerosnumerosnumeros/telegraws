@@ -53,8 +53,18 @@ func getALBARNFromWAF(ctx context.Context, wafClient *wafv2.Client, webACLName, 
 	return resourcesOutput.ResourceArns[0], nil
 }
 
-func WAFMetrics(ctx context.Context, wafClient *wafv2.Client, cwClient *cloudwatch.Client, webACLId, webACLName string, scopeStr string, timeParams map[string]time.Time) (map[string]float64, error) {
-	// default → REGIONAL
+func WAFMetrics(
+	ctx context.Context,
+	wafClient *wafv2.Client,
+	cwClient *cloudwatch.Client,
+	webACLId, webACLName string,
+	scopeStr string,
+	timeParams map[string]time.Time,
+	accountID string,
+	distributionID string,
+) (map[string]float64, error) {
+
+	// default -> REGIONAL
 	var scope wafTypes.Scope
 	switch scopeStr {
 	case "CLOUDFRONT":
@@ -63,9 +73,18 @@ func WAFMetrics(ctx context.Context, wafClient *wafv2.Client, cwClient *cloudwat
 		scope = wafTypes.ScopeRegional
 	}
 
-	albARN, err := getALBARNFromWAF(ctx, wafClient, webACLName, webACLId, scope)
-	if err != nil && scope == wafTypes.ScopeRegional {
-		return nil, fmt.Errorf("failed to get ALB ARN from WAF: %w", err)
+	var resourceARN string
+	var err error
+
+	if scope == wafTypes.ScopeCloudfront {
+		// Build CloudFront distribution ARN
+		resourceARN = fmt.Sprintf("arn:aws:cloudfront::%s:distribution/%s", accountID, distributionID)
+	} else {
+		// Regional WAF (ALB)
+		resourceARN, err = getALBARNFromWAF(ctx, wafClient, webACLName, webACLId, scope)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get ALB ARN from WAF: %w", err)
+		}
 	}
 
 	metrics := map[string]float64{}
@@ -86,14 +105,15 @@ func WAFMetrics(ctx context.Context, wafClient *wafv2.Client, cwClient *cloudwat
 		var dimensions []types.Dimension
 
 		if scope == wafTypes.ScopeCloudfront {
-			// CloudFront WAF metric dimension is WebACL
+			// CloudFront WAF metrics -> Resource + CF
 			dimensions = []types.Dimension{
-				{Name: aws.String("WebACL"), Value: aws.String(webACLName)},
+				{Name: aws.String("Resource"), Value: aws.String(resourceARN)},
+				{Name: aws.String("ResourceType"), Value: aws.String("CF")},
 			}
 		} else {
-			// Regional WAF (ALB)
+			// Regional WAF (ALB, etc.)
 			dimensions = []types.Dimension{
-				{Name: aws.String("Resource"), Value: aws.String(albARN)},
+				{Name: aws.String("Resource"), Value: aws.String(resourceARN)},
 				{Name: aws.String("ResourceType"), Value: aws.String("ALB")},
 			}
 		}
@@ -119,11 +139,19 @@ func WAFMetrics(ctx context.Context, wafClient *wafv2.Client, cwClient *cloudwat
 				zap.String("scope", scopeStr),
 				zap.Int32("period", *period),
 			)
+			metrics[metric.Name] = 0.0
 			continue
 		}
 
 		if len(result.Datapoints) > 0 {
-			metrics[metric.Name] = *result.Datapoints[0].Sum
+			// latest datapoint
+			latest := result.Datapoints[0]
+			for _, dp := range result.Datapoints {
+				if dp.Timestamp.After(*latest.Timestamp) {
+					latest = dp
+				}
+			}
+			metrics[metric.Name] = *latest.Sum
 		} else {
 			metrics[metric.Name] = 0.0
 		}

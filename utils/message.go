@@ -56,12 +56,8 @@ func BuildMessage(cfg *config.Config, timeParams *config.TimeParams, allMetrics 
 		if s3Data, exists := allMetrics["s3"]; exists {
 			s3Metrics := s3Data.(map[string]float64)
 			messageBuilder.WriteString(fmt.Sprintf("*S3* %s\n", escapeMarkdown(cfg.Services.S3.BucketName)))
-			messageBuilder.WriteString(fmt.Sprintf("Size: %.2f MB\n", s3Metrics["BucketSizeBytes"]))
-			messageBuilder.WriteString(fmt.Sprintf("Requests: %.0f\n", s3Metrics["AllRequests"]))
-			messageBuilder.WriteString(fmt.Sprintf("4xx Errors: %.0f\n", s3Metrics["4xxErrors"]))
-			messageBuilder.WriteString(fmt.Sprintf("5xx Errors: %.0f\n", s3Metrics["5xxErrors"]))
-			messageBuilder.WriteString(fmt.Sprintf("Uploaded: %.2f MB\n", s3Metrics["BytesUploaded"]))
-			messageBuilder.WriteString(fmt.Sprintf("Downloaded: %.2f MB\n", s3Metrics["BytesDownloaded"]))
+			messageBuilder.WriteString(fmt.Sprintf("Size: %.2f MB\n", s3Metrics["BucketSizeMB"]))
+			messageBuilder.WriteString(fmt.Sprintf("Objects: %.0f\n", s3Metrics["NumberOfObjects"]))
 			messageBuilder.WriteString("\n")
 		}
 	}
@@ -93,10 +89,8 @@ func BuildMessage(cfg *config.Config, timeParams *config.TimeParams, allMetrics 
 			cfMetrics := cfData.(map[string]float64)
 			messageBuilder.WriteString(fmt.Sprintf("*CloudFront* %s\n", cfg.Services.CloudFront.DistributionID))
 			messageBuilder.WriteString(fmt.Sprintf("Requests: %.0f\n", cfMetrics["Requests"]))
-			messageBuilder.WriteString(fmt.Sprintf("Cache Hit Rate: %.2f%%\n", cfMetrics["CacheHitRate"]))
 			messageBuilder.WriteString(fmt.Sprintf("4xx Error Rate: %.2f%%\n", cfMetrics["4xxErrorRate"]))
 			messageBuilder.WriteString(fmt.Sprintf("5xx Error Rate: %.2f%%\n", cfMetrics["5xxErrorRate"]))
-			messageBuilder.WriteString(fmt.Sprintf("Origin Latency: %.2f ms\n", cfMetrics["OriginLatency"]))
 			messageBuilder.WriteString(fmt.Sprintf(" Uploaded: %.2f MB\n", cfMetrics["BytesUploaded"]))
 			messageBuilder.WriteString(fmt.Sprintf(" Downloaded: %.2f MB\n", cfMetrics["BytesDownloaded"]))
 			messageBuilder.WriteString("\n")
@@ -111,11 +105,20 @@ func BuildMessage(cfg *config.Config, timeParams *config.TimeParams, allMetrics 
 					tableMetrics := tableData.(map[string]float64)
 
 					messageBuilder.WriteString(fmt.Sprintf("*DynamoDB* %s\n", escapeMarkdown(tableName)))
-					messageBuilder.WriteString(fmt.Sprintf("Total Requests: %.0f\n", tableMetrics["RequestCount"]))
 
-					messageBuilder.WriteString(fmt.Sprintf("Read Throttles: %.0f\n", tableMetrics["ReadThrottledRequests"]))
-					messageBuilder.WriteString(fmt.Sprintf("Write Throttles: %.0f\n", tableMetrics["WriteThrottledRequests"]))
-					messageBuilder.WriteString(fmt.Sprintf("Latency: %.2f ms\n", tableMetrics["SuccessfulRequestLatency"]))
+					billingMode := tableMetrics["BillingMode"]
+
+					if billingMode == 0 { // PROVISIONED
+						messageBuilder.WriteString(fmt.Sprintf("Total Requests: %.0f\n", tableMetrics["RequestCount"]))
+						messageBuilder.WriteString(fmt.Sprintf("Latency: %.2f ms\n", tableMetrics["SuccessfulRequestLatency"]))
+					} else { // ON-DEMAND
+						messageBuilder.WriteString("Total Requests: N/A (On-Demand)\n")
+						messageBuilder.WriteString("Latency: N/A\n")
+					}
+					messageBuilder.WriteString(fmt.Sprintf("Items: %.0f\n", tableMetrics["ItemCount"]))
+
+					messageBuilder.WriteString(fmt.Sprintf("Read Throttles: %.0f\n", tableMetrics["ReadThrottleEvents"]))
+					messageBuilder.WriteString(fmt.Sprintf("Write Throttles: %.0f\n", tableMetrics["WriteThrottleEvents"]))
 					messageBuilder.WriteString(fmt.Sprintf("Read Capacity: %.0f units\n", tableMetrics["ConsumedReadCapacityUnits"]))
 					messageBuilder.WriteString(fmt.Sprintf("Write Capacity: %.0f units\n", tableMetrics["ConsumedWriteCapacityUnits"]))
 
