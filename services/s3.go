@@ -36,7 +36,7 @@ func S3Metrics(ctx context.Context, cwClient *cloudwatch.Client, bucketName stri
 				{Name: aws.String("BucketName"), Value: aws.String(bucketName)},
 				{Name: aws.String("StorageType"), Value: aws.String(storageType)},
 			},
-			StartTime:  aws.Time(timeParams["startTime"]),
+			StartTime:  aws.Time(timeParams["startTime"].AddDate(0, 0, -1)), // widen by 1 day
 			EndTime:    aws.Time(timeParams["endTime"]),
 			Period:     period,
 			Statistics: []types.Statistic{types.StatisticAverage},
@@ -71,7 +71,7 @@ func S3Metrics(ctx context.Context, cwClient *cloudwatch.Client, bucketName stri
 			{Name: aws.String("BucketName"), Value: aws.String(bucketName)},
 			{Name: aws.String("StorageType"), Value: aws.String("AllStorageTypes")},
 		},
-		StartTime:  aws.Time(timeParams["startTime"]),
+		StartTime:  aws.Time(timeParams["startTime"].AddDate(0, 0, -1)), // widen by 1 day
 		EndTime:    aws.Time(timeParams["endTime"]),
 		Period:     period,
 		Statistics: []types.Statistic{types.StatisticAverage},
